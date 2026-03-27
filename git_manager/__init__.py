@@ -1,0 +1,3 @@
+"""
+Git Manager Package
+"""

@@ -1,0 +1,36 @@
+{
+  "name": "patchpilot-middleware",
+  "version": "1.0.0",
+  "description": "Node.js + Express middleware for PatchPilot - bridges React frontend and Python FastAPI backend",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "patchpilot",
+    "middleware",
+    "express",
+    "api-gateway",
+    "sse",
+    "github-webhook"
+  ],
+  "author": "PatchPilot Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "dotenv": "^16.3.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,24 @@
+# PatchPilot Backend - Python Dependencies
+
+# ── Web Framework ─────────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+httpx==0.27.0
+pydantic==2.9.0
+pydantic-settings==2.5.0
+python-multipart==0.0.12
+
+# ── AI / LLM ──────────────────────────────────────────────────────
+google-generativeai==0.8.0
+
+# ── Docker & Container Management ────────────────────────────────
+docker==7.1.0
+
+# ── Git Operations ────────────────────────────────────────────────
+GitPython==3.1.43
+
+# ── Environment & Config ──────────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Optional: GitHub API (if not using httpx directly) ────────────
+# PyGithub==2.3.0

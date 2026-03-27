@@ -1,0 +1,38 @@
+.page { padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+.header { display: flex; justify-content: space-between; }
+.title { font-family: var(--font-display); font-size: 28px; letter-spacing: 2px; }
+.titleAccent { color: var(--neon-pink); }
+.subtitle { color: var(--text-secondary); }
+.repoInputCard { background: var(--bg-card); border: 1px solid var(--border-dim); padding: 16px; border-radius: var(--radius-lg); }
+.repoInputRow { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 10px; align-items: end; }
+.inputGroup { display: flex; flex-direction: column; gap: 6px; }
+.inputLabel { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+.inputWrap { position: relative; }
+.inputPrefix, .inputIcon { position: absolute; left: 10px; top: 10px; color: var(--neon-cyan); }
+.input { width: 100%; background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-mid); border-radius: var(--radius); padding: 9px 10px 9px 28px; }
+.inputSep { color: var(--text-secondary); font-size: 18px; padding-bottom: 8px; }
+.scanBtn, .refreshBtn { background: transparent; border: 1px solid var(--neon-cyan); color: var(--neon-cyan); border-radius: var(--radius); padding: 9px 12px; display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.scanBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+.spinning { animation: spin 1s linear infinite; }
+.errorBanner { border: 1px solid var(--neon-pink); color: var(--neon-pink); background: rgba(255,0,110,0.1); padding: 10px; border-radius: var(--radius); display: flex; gap: 8px; align-items: center; }
+.issuesSection { display: flex; flex-direction: column; gap: 12px; }
+.issuesHeader { display: flex; justify-content: space-between; align-items: center; }
+.issuesCount { font-family: var(--font-mono); color: var(--text-secondary); }
+.countNum { color: var(--neon-cyan); }
+.issueGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.issueCard { border: 1px solid var(--border-dim); background: var(--bg-card); border-radius: var(--radius-lg); padding: 14px; cursor: pointer; position: relative; }
+.issueCard:hover { border-color: var(--neon-cyan); }
+.issueTop { display: flex; justify-content: space-between; margin-bottom: 8px; }
+.issueNum { font-family: var(--font-mono); color: var(--neon-cyan); font-size: 11px; }
+.issuePilot { color: var(--neon-green); font-size: 11px; font-family: var(--font-mono); }
+.issueTitle { font-size: 15px; margin-bottom: 8px; }
+.issueBody { color: var(--text-secondary); font-size: 13px; }
+.issueMeta { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.label { font-size: 10px; border: 1px solid; border-radius: var(--radius); padding: 3px 6px; display: inline-flex; gap: 4px; align-items: center; }
+.issueTime { font-size: 10px; color: var(--text-dim); display: inline-flex; gap: 4px; align-items: center; }
+.cardGlow { display: none; }
+.emptyState, .landing { text-align: center; padding: 40px 10px; color: var(--text-secondary); }
+.emptyIcon { font-size: 36px; color: var(--neon-green); }
+.hexGrid { display: grid; grid-template-columns: repeat(6, 12px); gap: 4px; justify-content: center; margin-bottom: 10px; }
+.hex { width: 12px; height: 12px; border: 1px solid var(--neon-cyan); opacity: 0.6; }
+@media (max-width: 900px) { .repoInputRow { grid-template-columns: 1fr; } .inputSep { display: none; } }

@@ -1,0 +1,15 @@
+.viewer { border: 1px solid var(--border-dim); border-radius: var(--radius-lg); background: var(--bg-card); overflow: hidden; max-height: 560px; }
+.statsBar { display: flex; gap: 10px; align-items: center; padding: 10px; border-bottom: 1px solid var(--border-dim); background: var(--bg-panel); }
+.statAdd { color: var(--neon-green); font-family: var(--font-mono); }
+.statDel { color: var(--neon-pink); font-family: var(--font-mono); }
+.copyBtn { margin-left: auto; border: 1px solid var(--border-mid); background: transparent; color: var(--text-secondary); border-radius: var(--radius); padding: 5px 8px; display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.copyBtn:hover { border-color: var(--neon-cyan); color: var(--neon-cyan); }
+.diff { font-family: var(--font-mono); font-size: 12px; overflow: auto; max-height: 500px; }
+.line { display: grid; grid-template-columns: 20px 1fr; gap: 6px; padding: 0 8px; }
+.linePrefix { color: var(--text-dim); }
+.lineText { white-space: pre-wrap; word-break: break-word; }
+.lineAdd { background: rgba(0,255,136,0.12); color: var(--neon-green); }
+.lineRemove { background: rgba(255,0,110,0.12); color: var(--neon-pink); }
+.lineHunk { background: rgba(0,245,255,0.1); color: var(--neon-cyan); }
+.lineMeta { color: var(--text-secondary); }
+.lineCtx { color: var(--text-primary); }

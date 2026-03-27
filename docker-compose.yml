@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # ── PatchPilot Backend ──────────────────────────────────────────
+  patchpilot-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: patchpilot-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount code for hot-reload during development
+      - .:/app
+      # Persist cloned repos and patches
+      - ./repos:/app/repos
+      - ./patches:/app/patches
+      # Mount Docker socket so backend can manage OpenHands containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - OPENHANDS_IMAGE=${OPENHANDS_IMAGE:-ghcr.io/all-hands-ai/openhands:main}
+      - OPENHANDS_PORT=${OPENHANDS_PORT:-3000}
+      - OPENHANDS_WORKSPACE=${OPENHANDS_WORKSPACE:-/workspace}
+      - REPO_CLONE_DIR=/app/repos
+      - PATCH_OUTPUT_DIR=/app/patches
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-exp}
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=${DEBUG:-true}
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - patchpilot-network
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  patchpilot-network:
+    driver: bridge
+
+volumes:
+  repos:
+  patches:

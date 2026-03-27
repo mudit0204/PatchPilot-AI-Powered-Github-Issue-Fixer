@@ -1,0 +1,13 @@
+.stream { border: 1px solid var(--border-dim); border-radius: var(--radius-lg); background: var(--bg-card); max-height: 560px; overflow: hidden; }
+.inner { padding: 12px; overflow-y: auto; max-height: 560px; }
+.step { display: grid; grid-template-columns: 32px 1fr; gap: 8px; padding: 8px 0; }
+.stepLeft { display: flex; flex-direction: column; align-items: center; }
+.stepIcon { width: 24px; height: 24px; border: 1px solid var(--border-mid); border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+.stepLine { width: 2px; flex: 1; min-height: 18px; opacity: 0.4; margin-top: 5px; }
+.stepRight { min-width: 0; }
+.stepHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.stepLabel { font-family: var(--font-mono); font-size: 10px; }
+.stepTime { font-family: var(--font-mono); color: var(--text-dim); font-size: 10px; }
+.stepContent { margin: 0; padding: 8px; border: 1px solid var(--border-dim); border-radius: var(--radius); background: var(--bg-panel); color: var(--text-primary); font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.cursor { display: inline-flex; gap: 8px; align-items: center; font-family: var(--font-mono); color: var(--neon-cyan); font-size: 11px; padding: 8px 0; }
+.cursorDot { width: 6px; height: 6px; border-radius: 50%; background: var(--neon-cyan); animation: blink 1s infinite; }

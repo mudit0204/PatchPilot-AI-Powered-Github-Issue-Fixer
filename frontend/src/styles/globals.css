@@ -1,0 +1,150 @@
+/* ═══════════════════════════════════════════════════════════════
+   PatchPilot — Cyberpunk Design System
+   Fonts: Orbitron (display) · Rajdhani (body) · Share Tech Mono (code)
+   ═══════════════════════════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* ── Core palette ── */
+  --bg-void:      #020408;
+  --bg-deep:      #060d14;
+  --bg-panel:     #0a1520;
+  --bg-card:      #0d1e2e;
+  --bg-hover:     #112233;
+
+  /* ── Neon accents ── */
+  --neon-cyan:    #00f5ff;
+  --neon-green:   #00ff88;
+  --neon-pink:    #ff006e;
+  --neon-yellow:  #ffe600;
+  --neon-orange:  #ff6b00;
+
+  /* ── Text ── */
+  --text-primary:  #e0f0ff;
+  --text-secondary:#7a9bb5;
+  --text-dim:      #3a5570;
+  --text-code:     #00f5ff;
+
+  /* ── Borders ── */
+  --border-dim:   rgba(0, 245, 255, 0.08);
+  --border-mid:   rgba(0, 245, 255, 0.2);
+  --border-bright:rgba(0, 245, 255, 0.6);
+
+  /* ── Glows ── */
+  --glow-cyan:    0 0 20px rgba(0, 245, 255, 0.4), 0 0 60px rgba(0, 245, 255, 0.1);
+  --glow-green:   0 0 20px rgba(0, 255, 136, 0.4), 0 0 60px rgba(0, 255, 136, 0.1);
+  --glow-pink:    0 0 20px rgba(255, 0, 110, 0.4), 0 0 60px rgba(255, 0, 110, 0.1);
+
+  /* ── Typography ── */
+  --font-display: 'Orbitron', monospace;
+  --font-body:    'Rajdhani', sans-serif;
+  --font-mono:    'Share Tech Mono', monospace;
+
+  /* ── Spacing ── */
+  --radius:    4px;
+  --radius-lg: 8px;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Animated scanline overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 245, 255, 0.012) 2px,
+    rgba(0, 245, 255, 0.012) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-deep); }
+::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--neon-cyan); }
+
+/* Selection */
+::selection { background: rgba(0, 245, 255, 0.25); color: var(--neon-cyan); }
+
+/* ── Utility classes ── */
+.font-display { font-family: var(--font-display); }
+.font-mono    { font-family: var(--font-mono); }
+.font-body    { font-family: var(--font-body); }
+
+.neon-cyan  { color: var(--neon-cyan); }
+.neon-green { color: var(--neon-green); }
+.neon-pink  { color: var(--neon-pink); }
+
+.glow-cyan  { text-shadow: var(--glow-cyan); }
+.glow-green { text-shadow: var(--glow-green); }
+
+/* ── Animations ── */
+@keyframes flicker {
+  0%, 100% { opacity: 1; }
+  92% { opacity: 1; }
+  93% { opacity: 0.85; }
+  94% { opacity: 1; }
+  96% { opacity: 0.9; }
+  97% { opacity: 1; }
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(0, 245, 255, 0.3); }
+  50%       { border-color: rgba(0, 245, 255, 0.8); }
+}
+
+@keyframes scan-line {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes slide-in-left {
+  from { opacity: 0; transform: translateX(-24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-in-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes neon-pulse {
+  0%, 100% { box-shadow: var(--glow-cyan); }
+  50%       { box-shadow: 0 0 40px rgba(0, 245, 255, 0.7), 0 0 80px rgba(0, 245, 255, 0.2); }
+}
+
+@keyframes typing {
+  from { width: 0; }
+  to   { width: 100%; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
