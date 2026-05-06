@@ -22,8 +22,12 @@ class Settings(BaseSettings):
     # API Keys
     GEMINI_API_KEY: str = ""
     GITHUB_TOKEN: str = ""
+
+    # LLM provider: ollama | gemini
+    LLM_PROVIDER: str = "ollama"
     
     # OpenHands Configuration
+    OPENHANDS_ENABLED: bool = False  # Set True when Docker + OpenHands is available
     OPENHANDS_IMAGE: str = "ghcr.io/all-hands-ai/openhands:main"
     OPENHANDS_PORT: int = 3000
     OPENHANDS_WORKSPACE: str = "/workspace"
@@ -34,6 +38,12 @@ class Settings(BaseSettings):
     
     # Gemini Model
     GEMINI_MODEL: str = "gemini-2.0-flash-exp"
+
+    # Ollama Configuration
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
+    OLLAMA_BASE_URL_DOCKER: str = "http://host.docker.internal:11434"
+    OLLAMA_MODEL: str = "llama3.2:latest"
+    OLLAMA_TIMEOUT_SEC: int = 180
     
     # Server Configuration
     HOST: str = "0.0.0.0"

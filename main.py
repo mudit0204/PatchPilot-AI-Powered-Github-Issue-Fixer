@@ -3,6 +3,11 @@ PatchPilot Backend - Main FastAPI Application
 AI-powered GitHub issue resolution system
 """
 
+import sys
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -14,9 +19,9 @@ from api.routes import issues, agent, health
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    print("🚀 PatchPilot backend starting...")
+    print("PatchPilot backend starting...")
     yield
-    print("🛑 PatchPilot backend shutting down...")
+    print("PatchPilot backend shutting down...")
 
 
 app = FastAPI(

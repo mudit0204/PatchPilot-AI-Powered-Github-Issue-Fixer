@@ -7,6 +7,7 @@ running commands, and applying fixes autonomously.
 
 import asyncio
 import json
+import sys
 import uuid
 import os
 from typing import AsyncGenerator, Optional
@@ -28,9 +29,77 @@ class OpenHandsRunner:
     """
 
     def __init__(self):
-        self.docker_client = docker.from_env()
         self._container = None
         self._host_port: Optional[int] = None
+        self._docker_client = None
+
+    # ── Docker client (lazy init) ────────────────────────────────────────
+
+    def _get_docker_client(self):
+        """Get or create Docker client, handling Windows/Linux differences."""
+        if self._docker_client is not None:
+            return self._docker_client
+
+        try:
+            self._docker_client = docker.from_env()
+            # Quick sanity check
+            self._docker_client.ping()
+            return self._docker_client
+        except Exception as e:
+            raise RuntimeError(
+                f"Cannot connect to Docker daemon: {e}\n"
+                f"Please ensure Docker Desktop is running."
+            ) from e
+
+    @staticmethod
+    def _normalize_provider() -> str:
+        return (settings.LLM_PROVIDER or "ollama").strip().lower()
+
+    def _openhands_model_name(self) -> str:
+        provider = self._normalize_provider()
+        if provider == "ollama":
+            return f"ollama/{settings.OLLAMA_MODEL}"
+        return f"google/{settings.GEMINI_MODEL}"
+
+    def _container_environment(self) -> dict:
+        provider = self._normalize_provider()
+        env = {
+            "LLM_MODEL": self._openhands_model_name(),
+            "SANDBOX_RUNTIME_CONTAINER_IMAGE": "ghcr.io/all-hands-ai/runtime:main",
+            "LOG_ALL_EVENTS": "true",
+        }
+
+        if provider == "ollama":
+            env["LLM_BASE_URL"] = settings.OLLAMA_BASE_URL_DOCKER
+            env["LLM_API_KEY"] = "ollama"
+        else:
+            env["LLM_API_KEY"] = settings.GEMINI_API_KEY
+
+        # Pass GitHub token to OpenHands so it can interact with PRs/Issues if needed
+        if settings.GITHUB_TOKEN:
+            env["GITHUB_TOKEN"] = settings.GITHUB_TOKEN
+
+        return env
+
+    def _get_volumes(self, workspace_path: str) -> dict:
+        """Build volume mounts, handling Windows vs Linux Docker socket."""
+        volumes = {
+            workspace_path: {"bind": settings.OPENHANDS_WORKSPACE, "mode": "rw"},
+        }
+
+        if sys.platform == "win32":
+            # Windows Docker Desktop — mount the named pipe so OpenHands
+            # can spawn its own sandbox containers.
+            pipe = "//./pipe/docker_engine"
+            volumes[pipe] = {"bind": "/var/run/docker.sock", "mode": "rw"}
+        else:
+            # Linux / macOS
+            volumes["/var/run/docker.sock"] = {
+                "bind": "/var/run/docker.sock",
+                "mode": "rw",
+            }
+
+        return volumes
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -38,6 +107,7 @@ class OpenHandsRunner:
         """
         Start the OpenHands Docker container.
         Returns the container ID.
+        Raises RuntimeError with a human-readable message on failure.
         """
         os.makedirs(workspace_path, exist_ok=True)
 
@@ -45,31 +115,45 @@ class OpenHandsRunner:
         if self._container:
             return self._container.id
 
+        client = self._get_docker_client()
         self._host_port = self._find_free_port()
 
-        print(f"🐳 Starting OpenHands container on port {self._host_port}...")
+        container_name = f"patchpilot-openhands-{uuid.uuid4().hex[:6]}"
+        print(f"🐳 Starting OpenHands container '{container_name}' on port {self._host_port}...")
 
-        self._container = self.docker_client.containers.run(
-            image=settings.OPENHANDS_IMAGE,
-            name=f"patchpilot-openhands-{uuid.uuid4().hex[:6]}",
-            detach=True,
-            remove=True,   # Auto-remove when stopped
-            ports={f"{OPENHANDS_PORT}/tcp": self._host_port},
-            volumes={
-                workspace_path: {"bind": settings.OPENHANDS_WORKSPACE, "mode": "rw"},
-                # Mount Docker socket so OpenHands can spin up its own sandbox
-                "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
-            },
-            environment={
-                "LLM_MODEL": f"google/{settings.GEMINI_MODEL}",
-                "LLM_API_KEY": settings.GEMINI_API_KEY,
-                "SANDBOX_RUNTIME_CONTAINER_IMAGE": "ghcr.io/all-hands-ai/runtime:main",
-                "LOG_ALL_EVENTS": "true",
-            },
-        )
+        try:
+            # Ensure image is available
+            try:
+                client.images.get(settings.OPENHANDS_IMAGE)
+            except docker.errors.ImageNotFound:
+                print(f"📥 Pulling OpenHands image {settings.OPENHANDS_IMAGE} (this may take a while)...")
+                client.images.pull(settings.OPENHANDS_IMAGE)
 
-        print(f"✅ OpenHands container started: {self._container.short_id}")
-        return self._container.id
+            self._container = client.containers.run(
+                image=settings.OPENHANDS_IMAGE,
+                name=container_name,
+                detach=True,
+                remove=True,   # Auto-remove when stopped
+                ports={f"{OPENHANDS_PORT}/tcp": self._host_port},
+                volumes=self._get_volumes(workspace_path),
+                environment=self._container_environment(),
+                extra_hosts={"host.docker.internal": "host-gateway"},
+            )
+
+            print(f"✅ OpenHands container started: {self._container.short_id}")
+            return self._container.id
+
+        except docker.errors.APIError as e:
+            raise RuntimeError(
+                f"Failed to start OpenHands container: {e.explanation or e}\n"
+                f"Image: {settings.OPENHANDS_IMAGE}\n"
+                f"Try: docker pull {settings.OPENHANDS_IMAGE}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to start OpenHands container: {e}\n"
+                f"Ensure Docker Desktop is running and the OpenHands image is pulled."
+            ) from e
 
     def stop_container(self):
         """Stop and remove the OpenHands container."""
@@ -121,6 +205,20 @@ class OpenHandsRunner:
                         return
                 except Exception:
                     pass
+
+                # Also check container hasn't died
+                if self._container:
+                    try:
+                        self._container.reload()
+                        if self._container.status not in ("running", "created"):
+                            logs = self._container.logs(tail=30).decode(errors="replace")
+                            raise RuntimeError(
+                                f"OpenHands container exited ({self._container.status}).\n"
+                                f"Last logs:\n{logs}"
+                            )
+                    except docker.errors.NotFound:
+                        raise RuntimeError("OpenHands container was removed unexpectedly.")
+
                 await asyncio.sleep(3)
 
         raise TimeoutError("OpenHands container did not become ready in time.")
@@ -131,13 +229,19 @@ class OpenHandsRunner:
             resp = await client.post(
                 f"{base_url}/api/conversations",
                 json={
-                    "initial_user_message": task,
-                    "runtime_type": "docker",
+                    "initial_user_msg": task,
                 },
                 timeout=30,
             )
-            resp.raise_for_status()
-            return resp.json()["conversation_id"]
+            
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                print(f"❌ OpenHands API Error: {e.response.text}")
+                raise
+                
+            data = resp.json()
+            return data.get("conversation_id") or data.get("id") or str(data)
 
     async def _stream_events(
         self, base_url: str, conversation_id: str

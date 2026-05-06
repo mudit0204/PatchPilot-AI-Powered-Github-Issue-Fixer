@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 import json
+import traceback
 
 from models import AgentRunRequest, AgentStep
 
@@ -36,9 +37,32 @@ async def run_agent(request: AgentRunRequest):
                     event_data = step.model_dump_json()
                     yield f"data: {event_data}\n\n"
             except Exception as e:
+                # Capture full error details with traceback
+                import sys
+                exc_type = type(e).__name__
+                exc_str = str(e)
+                exc_repr = repr(e)
+                
+                print(f"\n[AGENT ERROR] Type: {exc_type}", file=sys.stderr)
+                print(f"[AGENT ERROR] str(e): '{exc_str}'", file=sys.stderr)
+                print(f"[AGENT ERROR] repr(e): {exc_repr}", file=sys.stderr)
+                
+                tb_str = traceback.format_exc()
+                print(f"[AGENT ERROR] Full traceback:\n{tb_str}", file=sys.stderr)
+                
+                # Build error message with all available info
+                if exc_str:
+                    error_message = f"{exc_type}: {exc_str}"
+                elif exc_repr and exc_repr != f"<{exc_type} object at":
+                    error_message = f"{exc_type}: {exc_repr}"
+                else:
+                    error_message = f"{exc_type} (no message available)"
+                
+                full_error = f"{error_message}\n\nTraceback:\n{tb_str}"
+                
                 error_step = AgentStep(
                     step_type="error",
-                    content=f"Agent execution failed: {str(e)}"
+                    content=f"Agent execution failed: {full_error}"
                 )
                 yield f"data: {error_step.model_dump_json()}\n\n"
         
@@ -48,7 +72,12 @@ async def run_agent(request: AgentRunRequest):
         )
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start agent: {str(e)}")
+        error_message = f"{type(e).__name__}: {str(e)}"
+        if not str(e):
+            error_message = f"{type(e).__name__}: {repr(e)}"
+        tb_str = traceback.format_exc()
+        full_error = f"{error_message}\n\nTraceback:\n{tb_str}"
+        raise HTTPException(status_code=500, detail=f"Failed to start agent: {full_error}")
 
 
 @router.post("/run-sync")
@@ -76,7 +105,12 @@ async def run_agent_sync(request: AgentRunRequest):
         }
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+        error_message = f"{type(e).__name__}: {str(e)}"
+        if not str(e):
+            error_message = f"{type(e).__name__}: {repr(e)}"
+        tb_str = traceback.format_exc()
+        full_error = f"{error_message}\n\nTraceback:\n{tb_str}"
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {full_error}")
 
 
 @router.get("/status/{run_id}")
