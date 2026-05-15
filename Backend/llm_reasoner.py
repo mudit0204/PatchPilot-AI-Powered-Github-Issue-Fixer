@@ -4,6 +4,7 @@ Supports Gemini and Ollama providers for issue analysis and patch generation.
 """
 
 import json
+import os
 import re
 from typing import AsyncGenerator, Protocol
 import httpx
@@ -32,23 +33,26 @@ CRITICAL OUTPUT FORMAT:
 
 PATCH FORMAT EXAMPLE:
 <PATCH>
---- a/src/utils.py
-+++ b/src/utils.py
-@@ -10,7 +10,7 @@
- def process_data(data):
--    result = data.split(",")
-+    result = data.strip().split(",")
-     return result
+--- a/helloworld.java
++++ b/helloworld.java
+@@ -1,5 +1,6 @@
+ public class HelloWorld {
+     public static void main(String[] args) {
+-        System.out.print("Hello");
++        System.out.println("Hello World");
+     }
+ }
 </PATCH>
 
-Rules:
-- Be precise. Minimal changes only.
-- Every patch MUST include --- a/ and +++ b/ file headers and @@ hunk headers.
-- Do NOT hallucinate file paths — only reference files EXACTLY as they appear in the context provided (e.g., if the context says `helloworld.java`, do not write `src/main/java/HelloWorld.java`).
-- Always wrap the final diff inside <PATCH> tags, even if it is short.
-        - Never use placeholder lines such as "..." or "…" inside patches. A patch containing these will be rejected.
-        - Do not produce no-op diffs. Every removed line and added line must represent a real code change. A patch with no effective changes will be rejected.
-        - Every patch MUST contain at least one hunk header (lines starting with @@).
+ABSOLUTE RULES (violate these and the patch will fail):
+1. ONLY modify files that appear in the repository file list provided below.
+2. Use the EXACT filenames as they appear in the file list — do NOT add path prefixes like "src/", "src/main/java/", etc.
+3. Do NOT hallucinate file paths or nested directories — stick ONLY to files in the provided list.
+4. Every patch MUST include --- a/ and +++ b/ file headers and @@ hunk headers.
+5. Never use placeholder lines such as "..." or "…" inside patches.
+6. Do not produce no-op diffs. Every removed and added line must be real code changes.
+7. Every patch MUST contain at least one hunk header (lines starting with @@).
+8. Be precise and minimal — only change what's necessary to fix the issue.
 """
 
 ISSUE_ANALYSIS_PROMPT = """
@@ -59,13 +63,20 @@ ISSUE_ANALYSIS_PROMPT = """
 **Issue Description:**
 {body}
 
-**Repository files context:**
+**Available files to modify (use these EXACT names, no path prefixes):**
+{file_list}
+
+**File Context:**
 {file_context}
 
-Analyze this issue and produce a fix. Think carefully before writing any patch.
+Analyze this issue and produce a fix. Remember:
+- ONLY use files from the "Available files" list above
+- Use the EXACT filename as shown (no path prefixes)
+- Do not make up or hallucinate file paths
+
 Start with your reasoning inside <THOUGHT> tags, then produce the unified diff
-patch inside <PATCH> tags, and finally a short human-readable summary inside
-<EXPLANATION> tags.
+patch inside <PATCH> tags using the exact filenames from the list above, and 
+finally a short human-readable summary inside <EXPLANATION> tags.
 """
 
 
@@ -77,13 +88,15 @@ class Reasoner(Protocol):
 
 
 class BaseReasoner:
-    def _build_prompt(self, issue: GitHubIssue, file_context: str) -> str:
+    def _build_prompt(self, issue: GitHubIssue, file_context: str, file_list: str = "") -> str:
+        """Build the analysis prompt with file list and context"""
         return ISSUE_ANALYSIS_PROMPT.format(
             issue_number=issue.number,
             title=issue.title,
             owner=getattr(issue, "repo_owner", ""),
             repo=getattr(issue, "repo_name", ""),
             body=issue.body,
+            file_list=file_list or "No specific files detected",
             file_context=file_context or "No file context available.",
         )
 
@@ -311,7 +324,11 @@ class OllamaReasoner(BaseReasoner):
     """Uses local Ollama model for issue analysis and patch generation."""
 
     def __init__(self):
-        self.base_url = settings.OLLAMA_BASE_URL.rstrip("/")
+        base_url = settings.OLLAMA_BASE_URL
+        if os.path.exists("/.dockerenv") and settings.OLLAMA_BASE_URL_DOCKER:
+            base_url = settings.OLLAMA_BASE_URL_DOCKER
+
+        self.base_url = base_url.rstrip("/")
         self.model = settings.OLLAMA_MODEL
         self.timeout = settings.OLLAMA_TIMEOUT_SEC
 
@@ -328,17 +345,23 @@ class OllamaReasoner(BaseReasoner):
         }
 
         full_text = ""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", f"{self.base_url}/api/generate", json=payload) as response:
-                response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout)) as client:
+                async with client.stream("POST", f"{self.base_url}/api/generate", json=payload) as response:
+                    response.raise_for_status()
 
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    token = data.get("response", "")
-                    if token:
-                        full_text += token
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        token = data.get("response", "")
+                        if token:
+                            full_text += token
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {self.base_url}. "
+                "Ensure Ollama is running and the backend is using the correct host URL."
+            ) from exc
 
         # Parse complete response for structured tags
         steps = self._extract_steps(full_text)
@@ -387,10 +410,16 @@ class OllamaReasoner(BaseReasoner):
                 "options": {"temperature": 0.1},
             }
 
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(f"{self.base_url}/api/generate", json=payload)
-                response.raise_for_status()
-                text = response.json().get("response", "")
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout)) as client:
+                    response = await client.post(f"{self.base_url}/api/generate", json=payload)
+                    response.raise_for_status()
+                    text = response.json().get("response", "")
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                raise RuntimeError(
+                    f"Cannot connect to Ollama at {self.base_url}. "
+                    "Ensure Ollama is running and the backend is using the correct host URL."
+                ) from exc
 
             patch = self._extract_patch_text(text)
             if self._is_usable_patch(patch):

@@ -30,7 +30,7 @@ class GitHubIssue(BaseModel):
     """GitHub Issue representation"""
     number: int
     title: str
-    body: str
+    body: Optional[str] = None
     html_url: str
     state: str = "open"
     author: Optional[str] = None

@@ -15,7 +15,6 @@ from git_manager.git_ops import GitManager
 from openhands.runner import OpenHandsRunner
 
 settings = get_settings()
-OPENHANDS_HARD_DISABLED = True
 
 
 class PatchPilotOrchestrator:
@@ -82,7 +81,7 @@ class PatchPilotOrchestrator:
         # ── Step 4: Run OpenHands Agent (if enabled) ─────────────────────
         patch_content = ""
 
-        use_openhands = settings.OPENHANDS_ENABLED and not OPENHANDS_HARD_DISABLED
+        use_openhands = bool(settings.OPENHANDS_ENABLED)
 
         if use_openhands:
             yield self.emit(StepType.THOUGHT, "🤖 Starting OpenHands AI agent...")
@@ -115,10 +114,7 @@ class PatchPilotOrchestrator:
             finally:
                 runner.stop_container()
         else:
-            if settings.OPENHANDS_ENABLED and OPENHANDS_HARD_DISABLED:
-                yield self.emit(StepType.THOUGHT, "⚙️ OpenHands is force-disabled. Using direct LLM patch generation...")
-            else:
-                yield self.emit(StepType.THOUGHT, "⚙️ OpenHands is disabled. Using direct LLM patch generation...")
+            yield self.emit(StepType.THOUGHT, "Using direct LLM patch generation...")
 
         # ── Step 5: Direct LLM Fallback / Patch Generation ───────────────
         if not patch_content:
@@ -275,12 +271,21 @@ class PatchPilotOrchestrator:
         """
         import re
 
+        all_files = file_tree.split("\n")
+        all_files = [f for f in all_files if f.strip()]  # Remove empty strings
+        
+        # Start with a clear list of available files
+        file_list_str = "AVAILABLE FILES (use these EXACT names in patches):\n"
+        for f in all_files[:20]:  # Show first 20 files
+            file_list_str += f"  - {f}\n"
+        if len(all_files) > 20:
+            file_list_str += f"  ... and {len(all_files) - 20} more files\n"
+        
         # Extract words from issue that look like file references
         issue_text = f"{issue.title} {issue.body}"
         mentioned = re.findall(r"[\w/]+\.\w{2,4}", issue_text)
 
-        all_files = file_tree.split("\n")
-        relevant = []
+        relevant = [file_list_str]
 
         for mention in mentioned[:5]:
             for f in all_files:
@@ -293,7 +298,7 @@ class PatchPilotOrchestrator:
         # Always include README if present
         readme = await git.read_file("README.md") or await git.read_file("readme.md")
         if readme:
-            relevant.insert(0, f"### README.md\n```\n{readme[:1000]}\n```")
+            relevant.insert(1, f"### README.md\n```\n{readme[:1000]}\n```")
 
         return "\n\n".join(relevant)
 
@@ -307,32 +312,66 @@ class PatchPilotOrchestrator:
             return ""
 
         normalized_lines = []
-        repo_files = await git.get_all_files() # Get all files in the repo
+        repo_files = await git.get_all_files()  # Get all files in the repo
+        
+        if not repo_files:
+            return patch_content  # No files to normalize against
+        
         repo_files_lower = {f.lower(): f for f in repo_files}
 
         for line in patch_content.splitlines():
             if line.startswith("--- a/") or line.startswith("+++ b/"):
                 original_path_in_patch = line[6:].strip()
-                # Attempt to find a matching file in the repository
                 matched_path = None
 
                 # 1. Direct match (case-insensitive)
                 if original_path_in_patch.lower() in repo_files_lower:
                     matched_path = repo_files_lower[original_path_in_patch.lower()]
                 else:
-                    # 2. Try matching by filename only (e.g., 'HelloWorld.java' -> 'helloworld.java')
+                    # 2. Extract just the filename from the patch path
                     filename_in_patch = original_path_in_patch.split('/')[-1]
+                    filename_lower = filename_in_patch.lower()
+                    
+                    # Try exact filename match first
                     for actual_file in repo_files:
-                        if actual_file.lower().endswith(filename_in_patch.lower()):
+                        if actual_file.lower() == filename_lower:
                             matched_path = actual_file
                             break
+                    
+                    # If no exact match, try endswith match (for nested paths)
+                    if not matched_path:
+                        for actual_file in repo_files:
+                            actual_lower = actual_file.lower()
+                            # Try matching with possible path separators
+                            if actual_lower == filename_lower or actual_lower.endswith("/" + filename_lower):
+                                matched_path = actual_file
+                                break
+                    
+                    # Last resort: fuzzy match by extension and partial name
+                    if not matched_path and "." in filename_in_patch:
+                        ext = filename_in_patch.split('.')[-1]
+                        base_name = filename_in_patch.rsplit('.', 1)[0].lower()
+                        
+                        for actual_file in repo_files:
+                            if actual_file.lower().endswith("." + ext):
+                                actual_base = actual_file.rsplit('.', 1)[0].lower()
+                                # Match if the actual filename contains or matches the base name
+                                if actual_base.endswith(base_name) or base_name.endswith(actual_base) or base_name in actual_base:
+                                    matched_path = actual_file
+                                    break
 
                 if matched_path:
-                    # Replace the hallucinated path with the actual path
                     normalized_lines.append(f"{line[:6]}{matched_path}")
-                    await self.emit(StepType.THOUGHT, f"Path corrected: {original_path_in_patch} -> {matched_path}")
+                    if matched_path != original_path_in_patch:
+                        await self.emit(StepType.THOUGHT, f"📍 Path corrected: {original_path_in_patch} → {matched_path}")
                 else:
-                    normalized_lines.append(line) # No match, keep original
+                    # If still no match, try to check if file exists at root
+                    if any(f == original_path_in_patch.split('/')[-1] for f in repo_files):
+                        matched_path = original_path_in_patch.split('/')[-1]
+                        normalized_lines.append(f"{line[:6]}{matched_path}")
+                        await self.emit(StepType.THOUGHT, f"📍 Path simplified: {original_path_in_patch} → {matched_path}")
+                    else:
+                        normalized_lines.append(line)  # No match, keep original
             else:
                 normalized_lines.append(line)
 

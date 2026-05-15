@@ -8,6 +8,7 @@ Flow:
 
 import uuid
 import asyncio
+import re
 from datetime import datetime
 from typing import AsyncGenerator, Optional
 
@@ -22,7 +23,6 @@ from git_manager.git_ops import GitManager
 from openhands.runner import OpenHandsRunner
 
 settings = get_settings()
-OPENHANDS_HARD_DISABLED = True
 
 
 class PatchPilotOrchestrator:
@@ -87,7 +87,7 @@ class PatchPilotOrchestrator:
         # ── Step 4: Run OpenHands Agent (if enabled) ─────────────────────
         patch_content = ""
 
-        use_openhands = settings.OPENHANDS_ENABLED and not OPENHANDS_HARD_DISABLED
+        use_openhands = bool(settings.OPENHANDS_ENABLED)
 
         if use_openhands:
             yield await self.emit(StepType.THOUGHT, "🤖 Starting OpenHands AI agent...")
@@ -99,46 +99,76 @@ class PatchPilotOrchestrator:
                 runner.start_container(workspace_path=str(repo_path))
 
                 async for step in runner.run_task(openhands_task, workspace_path=str(repo_path)):
-                    steps.append(step)
-                    yield step
-
-                    # Capture patch if emitted
                     if step.step_type == StepType.PATCH and step.content:
-                        patch_content = step.content
+                        prepared = self._prepare_patch_candidate(step.content, issue, git)
+                        if prepared:
+                            patch_step = await self.emit(StepType.PATCH, prepared)
+                            steps.append(patch_step)
+                            yield patch_step
+                            patch_content = prepared
+                        else:
+                            yield await self.emit(
+                                StepType.THOUGHT,
+                                "Discarded an OpenHands patch that did not match this issue or repository.",
+                            )
+                    else:
+                        steps.append(step)
+                        yield step
 
                 # After OpenHands finishes, check if files were modified directly
                 if not patch_content:
                     has_changes = await git.has_changes()
                     if has_changes:
                         yield await self.emit(StepType.THOUGHT, "🔎 OpenHands modified files directly. Capturing diff...")
-                        patch_content = await git.get_current_diff()
+                        captured_diff = await git.get_current_diff()
+                        patch_content = self._prepare_patch_candidate(captured_diff, issue, git)
                         if patch_content:
                             yield await self.emit(StepType.PATCH, patch_content)
+                        else:
+                            await git.discard_changes()
+                            yield await self.emit(
+                                StepType.THOUGHT,
+                                "Discarded OpenHands file changes that did not match this issue.",
+                            )
 
             except Exception as e:
                 yield await self.emit(StepType.ERROR, f"OpenHands agent error: {e}. Falling back to LLM mode.")
             finally:
                 runner.stop_container()
         else:
-            if settings.OPENHANDS_ENABLED and OPENHANDS_HARD_DISABLED:
-                yield await self.emit(StepType.THOUGHT, "⚙️ OpenHands is force-disabled. Using direct LLM patch generation...")
-            else:
-                yield await self.emit(StepType.THOUGHT, "⚙️ OpenHands is disabled. Using direct LLM patch generation...")
+            yield await self.emit(StepType.THOUGHT, "Using direct LLM patch generation...")
 
         # ── Step 5: Direct LLM Fallback / Patch Generation ───────────────
         if not patch_content:
             yield await self.emit(StepType.THOUGHT, "🧠 Running LLM for patch generation...")
             try:
                 async for step in self.reasoner.analyze_issue(issue, relevant_content):
-                    steps.append(step)
-                    yield step
-
                     if step.step_type == StepType.PATCH and step.content:
-                        patch_content = step.content
+                        prepared = self._prepare_patch_candidate(step.content, issue, git)
+                        if prepared:
+                            patch_step = await self.emit(StepType.PATCH, prepared)
+                            steps.append(patch_step)
+                            yield patch_step
+                            patch_content = prepared
+                        else:
+                            yield await self.emit(
+                                StepType.THOUGHT,
+                                "Discarded a generated patch that did not match this issue or repository.",
+                            )
+                    else:
+                        steps.append(step)
+                        yield step
 
                 if not patch_content and hasattr(self.reasoner, "generate_patch_only"):
                     yield await self.emit(StepType.THOUGHT, "🔁 Trying strict patch-only generation...")
-                    patch_content = await self.reasoner.generate_patch_only(issue, relevant_content)
+                    generated_patch = await self.reasoner.generate_patch_only(issue, relevant_content)
+                    patch_content = self._prepare_patch_candidate(generated_patch, issue, git)
+                    if not patch_content:
+                        patch_content = self._prepare_patch_candidate(
+                            self._synthesize_issue_patch(issue, relevant_content),
+                            issue,
+                            git,
+                        )
                     if patch_content:
                         yield await self.emit(StepType.PATCH, patch_content)
                         yield await self.emit(StepType.RESULT, "✅ Recovered patch from patch-only generation.")
@@ -147,8 +177,16 @@ class PatchPilotOrchestrator:
                 return
 
         if not patch_content:
-            yield await self.emit(StepType.ERROR, "❌ Could not generate a patch for this issue.")
-            return
+            patch_content = self._prepare_patch_candidate(
+                self._synthesize_issue_patch(issue, relevant_content),
+                issue,
+                git,
+            )
+            if patch_content:
+                yield await self.emit(StepType.PATCH, patch_content)
+            else:
+                yield await self.emit(StepType.ERROR, "❌ Could not generate a patch for this issue.")
+                return
 
         # Emit patch if not already emitted
         if not any(s.step_type == StepType.PATCH and s.content == patch_content for s in steps):
@@ -170,7 +208,17 @@ class PatchPilotOrchestrator:
         else:
             yield await self.emit(StepType.ACTION, "🩹 Applying patch to repository...")
             
-            # CHANGE 2: Normalize paths before first apply
+            patch_content = self._prepare_patch_candidate(patch_content, issue, git)
+            if not patch_content:
+                patch_content = self._prepare_patch_candidate(
+                    self._synthesize_issue_patch(issue, relevant_content),
+                    issue,
+                    git,
+                )
+            if not patch_content:
+                yield await self.emit(StepType.ERROR, "❌ Generated patch did not match this issue or repository.")
+                return
+
             patch_content = await self._normalize_patch_paths(patch_content, git)
             success = await git.apply_patch(patch_content)
 
@@ -187,6 +235,13 @@ class PatchPilotOrchestrator:
                 )
                 try:
                     regenerated_patch = await self.reasoner.generate_patch_only(issue, relevant_content)
+                    regenerated_patch = self._prepare_patch_candidate(regenerated_patch, issue, git)
+                    if not regenerated_patch:
+                        regenerated_patch = self._prepare_patch_candidate(
+                            self._synthesize_issue_patch(issue, relevant_content),
+                            issue,
+                            git,
+                        )
                 except Exception as e:
                     regenerated_patch = ""
                     yield await self.emit(StepType.ERROR, f"Strict patch regeneration failed: {type(e).__name__}: {str(e)}")
@@ -282,6 +337,67 @@ class PatchPilotOrchestrator:
             commit_sha=sha,
         )
 
+    def _prepare_patch_candidate(self, patch: str, issue: GitHubIssue, git: GitManager) -> str:
+        """Normalize, repo-filter, and issue-filter a generated patch."""
+        if not patch:
+            return ""
+
+        normalized = git._normalize_patch_content(patch)
+        filtered = git._filter_patch_sections(normalized)
+        if not filtered.strip():
+            return ""
+
+        if not self._patch_matches_issue(filtered, issue):
+            return ""
+
+        return filtered
+
+    def _synthesize_issue_patch(self, issue: GitHubIssue, relevant_content: str) -> str:
+        """Ask the reasoner for its deterministic issue-aware fallback patch."""
+        synthesize = getattr(self.reasoner, "_synthesize_simple_create_files_patch", None)
+        if not synthesize:
+            return ""
+        return synthesize(issue, relevant_content)
+
+    @staticmethod
+    def _patch_matches_issue(patch: str, issue: GitHubIssue) -> bool:
+        """Reject stale patches that target files unrelated to the current issue."""
+        paths = PatchPilotOrchestrator._patch_target_paths(patch)
+        if not paths:
+            return False
+
+        issue_text = f"{issue.title or ''}\n{issue.body or ''}".lower()
+
+        asks_readme = "readme" in issue_text
+        if asks_readme:
+            return all(PatchPilotOrchestrator._is_readme_path(path) for path in paths)
+
+        mentions_java = any(term in issue_text for term in ("java", "helloworld", "compile", "syntax"))
+        if not mentions_java and any(path.lower().endswith(".java") for path in paths):
+            return False
+
+        return True
+
+    @staticmethod
+    def _patch_target_paths(patch: str) -> list[str]:
+        """Extract repo-relative target paths from a unified diff."""
+        paths = []
+        for line in (patch or "").splitlines():
+            if not line.startswith("+++ "):
+                continue
+            path = line[4:].strip()
+            if path == "/dev/null":
+                continue
+            path = re.sub(r"^[ab]/", "", path).lstrip("/")
+            if path:
+                paths.append(path)
+        return paths
+
+    @staticmethod
+    def _is_readme_path(path: str) -> bool:
+        name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        return name in {"readme", "readme.md", "readme.txt", "readme.rst"}
+
     # ── Helpers ───────────────────────────────────────────────────────────
 
     async def _gather_relevant_files(
@@ -312,6 +428,36 @@ class PatchPilotOrchestrator:
         readme = await git.read_file("README.md") or await git.read_file("readme.md")
         if readme:
             relevant.insert(0, f"### README.md\n```\n{readme[:1000]}\n```")
+
+        # For tiny repositories, include small source files as concrete context.
+        # Local models tend to hallucinate paths when given only a file tree.
+        if len(relevant) < 3:
+            already_seen = {
+                match.group(1)
+                for block in relevant
+                for match in re.finditer(r"^###\s+(.+)$", block, re.MULTILINE)
+            }
+            source_suffixes = {
+                ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp",
+                ".h", ".cs", ".go", ".rs", ".md", ".txt", ".json", ".yaml", ".yml"
+            }
+
+            for path in all_files:
+                path = path.strip()
+                if not path or path in already_seen:
+                    continue
+                if not any(path.lower().endswith(ext) for ext in source_suffixes):
+                    continue
+
+                content = await git.read_file(path)
+                if not content or len(content) > 6000:
+                    continue
+
+                relevant.append(f"### {path}\n```\n{content[:2500]}\n```")
+                already_seen.add(path)
+
+                if len(relevant) >= 8:
+                    break
 
         return "\n\n".join(relevant)
 

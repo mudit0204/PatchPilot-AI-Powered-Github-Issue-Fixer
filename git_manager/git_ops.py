@@ -5,6 +5,7 @@ Handles all git operations: cloning, patching, committing, pushing.
 
 import asyncio
 import os
+import stat
 import subprocess
 import shutil
 import re
@@ -41,8 +42,8 @@ class GitManager:
             f"https://x-access-token:{self.token}@github.com/{self.owner}/{self.name}.git"
         )
 
-        # Check if it's a valid git repository
-        is_valid_repo = self.local_path.exists() and (self.local_path / ".git").exists()
+        # Use a strict validity check; partial .git folders are common after failed clones.
+        is_valid_repo = self._is_valid_local_repo(self.local_path)
 
         if is_valid_repo:
             print(f"📥 Pulling latest changes for {self.owner}/{self.name}...")
@@ -50,23 +51,62 @@ class GitManager:
                 await self._run_git(["git", "fetch", "origin", "--prune"], cwd=self.local_path)
                 self.default_branch = branch or await self._detect_default_branch()
                 await self._run_git(["git", "checkout", self.default_branch], cwd=self.local_path)
+                await self._run_git(["git", "reset", "--hard", f"origin/{self.default_branch}"], cwd=self.local_path)
+                await self._run_git(["git", "clean", "-fd"], cwd=self.local_path)
                 await self._run_git(["git", "pull", "origin", self.default_branch], cwd=self.local_path)
             except subprocess.CalledProcessError as e:
-                print(f"⚠️ Pull failed ({e}). Re-cloning repository...")
-                shutil.rmtree(self.local_path, ignore_errors=True)
-                await self._run_git(["git", "clone", clone_url, str(self.local_path)])
+                safe_reason = (e.stderr or e.output or str(e)).strip()
+                print(f"⚠️ Pull failed ({safe_reason}). Re-cloning repository...")
+                self._force_remove_local_path()
+                await self._clone_repo(clone_url)
                 self.default_branch = branch or await self._detect_default_branch()
         else:
-            # If directory exists but is not a valid repo, clean it up
             if self.local_path.exists():
                 print(f"🧹 Cleaning up partial/invalid repository at {self.local_path}...")
-                shutil.rmtree(self.local_path, ignore_errors=True)
-            
-            print(f"📦 Cloning {self.owner}/{self.name}...")
-            await self._run_git(["git", "clone", clone_url, str(self.local_path)])
+                self._force_remove_local_path()
+
+            await self._clone_repo(clone_url)
             self.default_branch = branch or await self._detect_default_branch()
 
         return self.local_path
+
+    @staticmethod
+    def _is_valid_local_repo(path: Path) -> bool:
+        """Return True only for fully initialized git repos, not partial clone remnants."""
+        git_dir = path / ".git"
+        if not path.exists() or not git_dir.exists():
+            return False
+        if not (git_dir / "HEAD").exists():
+            return False
+        if not (git_dir / "config").exists():
+            return False
+        return True
+
+    def _force_remove_local_path(self):
+        """Best-effort recursive delete for Windows where read-only bits can block removal."""
+        if not self.local_path.exists():
+            return
+
+        def onerror(func, value, _exc):
+            try:
+                os.chmod(value, stat.S_IWRITE)
+                func(value)
+            except Exception:
+                pass
+
+        shutil.rmtree(self.local_path, onerror=onerror, ignore_errors=False)
+
+    async def _clone_repo(self, clone_url: str):
+        """Clone repository and surface a redacted, actionable error on failure."""
+        print(f"📦 Cloning {self.owner}/{self.name}...")
+        try:
+            await self._run_git(["git", "clone", clone_url, str(self.local_path)])
+        except subprocess.CalledProcessError as e:
+            reason = (e.stderr or e.output or str(e)).strip()
+            raise RuntimeError(
+                f"Failed to clone {self.owner}/{self.name}: {reason}. "
+                "Verify the repository exists and the token has access."
+            ) from e
 
     # ── Branch ────────────────────────────────────────────────────────────
 
@@ -90,6 +130,12 @@ class GitManager:
         os.makedirs(settings.PATCH_OUTPUT_DIR, exist_ok=True)
 
         normalized_patch = self._normalize_patch_content(patch_content)
+        normalized_patch = self._filter_patch_sections(normalized_patch)
+
+        if not normalized_patch.strip():
+            self.last_patch_error = "Model output did not contain a valid patch for files in this repository."
+            print(f"❌ {self.last_patch_error}")
+            return False
 
         if not self._patch_has_effective_changes(normalized_patch):
             self.last_patch_error = "Patch has no effective code changes."
@@ -141,6 +187,12 @@ class GitManager:
         """
         print("🔧 Attempting direct file modification...")
         normalized = self._normalize_patch_content(patch_content)
+        normalized = self._filter_patch_sections(normalized)
+        if not normalized.strip():
+            self.last_patch_error = "Model output did not contain a valid patch for files in this repository."
+            print(f"❌ {self.last_patch_error}")
+            return False
+
         files_modified = 0
 
         # Parse the patch into per-file sections
@@ -428,6 +480,10 @@ class GitManager:
         in_hunk = False
 
         for line in lines:
+            stripped_line = line.strip()
+            if stripped_line in {"<PATCH>", "</PATCH>", "PATCH", "```"}:
+                continue
+
             # Models sometimes indent control lines (e.g. ' @@ ...').
             # git apply rejects these unless normalized.
             if re.match(r"^\s+(diff --git |--- |\+\+\+ |@@ )", line):
@@ -435,6 +491,8 @@ class GitManager:
 
             if line.startswith("@@ "):
                 in_hunk = True
+                normalized.append(line)
+                continue
             elif line.startswith("diff --git ") or line.startswith("--- ") or line.startswith("+++ "):
                 in_hunk = False
 
@@ -470,6 +528,144 @@ class GitManager:
             normalized.append(line)
 
         return "\n".join(normalized).strip() + "\n"
+
+    def _filter_patch_sections(self, patch_text: str) -> str:
+        """
+        Keep only patch sections that target real repository files or valid new
+        files. This strips tag/prose leftovers and prompt-example diffs before
+        git apply sees them.
+        """
+        sections = self._split_patch_sections(patch_text)
+        if not sections:
+            return ""
+
+        try:
+            result = subprocess.run(
+                ["git", "ls-files"],
+                cwd=str(self.local_path),
+                capture_output=True,
+                text=True,
+            )
+            tracked_files = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        except Exception:
+            tracked_files = set()
+
+        kept = []
+        for section in sections:
+            cleaned = self._clean_patch_section(section, tracked_files)
+            if cleaned:
+                kept.append(cleaned)
+
+        return "\n".join(kept).strip() + ("\n" if kept else "")
+
+    def _split_patch_sections(self, patch_text: str) -> list[list[str]]:
+        """Split normalized diff text into per-file sections."""
+        sections: list[list[str]] = []
+        current: list[str] = []
+
+        for raw_line in (patch_text or "").splitlines():
+            line = raw_line.rstrip("\r")
+            stripped = line.strip()
+            if stripped in {"<PATCH>", "</PATCH>", "PATCH", "```"}:
+                continue
+
+            starts_section = line.startswith("diff --git ") or line.startswith("--- ")
+            if starts_section and current:
+                sections.append(current)
+                current = []
+
+            if starts_section or current:
+                current.append(line)
+
+        if current:
+            sections.append(current)
+
+        return sections
+
+    def _clean_patch_section(self, lines: list[str], tracked_files: set[str]) -> str:
+        """Return a valid per-file patch section, or empty string if unusable."""
+        old_path = None
+        new_path = None
+        old_is_null = False
+        new_is_null = False
+        hunk_count = 0
+        removed: list[str] = []
+        added: list[str] = []
+        cleaned: list[str] = []
+        in_hunk = False
+
+        for line in lines:
+            if re.match(r"^\s+(diff --git |--- |\+\+\+ |@@ )", line):
+                line = line.lstrip()
+
+            stripped = line.strip()
+            if stripped in {"<PATCH>", "</PATCH>", "PATCH", "```"}:
+                continue
+
+            if line.startswith("--- "):
+                old_path = line[4:].strip()
+                old_is_null = old_path == "/dev/null"
+                in_hunk = False
+            elif line.startswith("+++ "):
+                new_path = line[4:].strip()
+                new_is_null = new_path == "/dev/null"
+                in_hunk = False
+            elif line.startswith("@@ "):
+                hunk_count += 1
+                in_hunk = True
+                cleaned.append(line)
+                continue
+            elif line.startswith("diff --git "):
+                in_hunk = False
+
+            if in_hunk and stripped in {"...", "…"}:
+                continue
+
+            if in_hunk:
+                if line.startswith("-") and not line.startswith("--- "):
+                    removed.append(line[1:])
+                elif line.startswith("+") and not line.startswith("+++ "):
+                    added.append(line[1:])
+                elif line and not line.startswith((" ", "-", "+", "\\")):
+                    line = " " + line
+
+            cleaned.append(line)
+
+        if not old_path or not new_path or hunk_count == 0:
+            return ""
+
+        target = new_path if not new_is_null else old_path
+        target = self._strip_diff_prefix(target)
+        old_target = self._strip_diff_prefix(old_path)
+
+        if not target:
+            return ""
+
+        if not old_is_null and not new_is_null and old_target != target:
+            return ""
+
+        if not old_is_null and old_target not in tracked_files:
+            return ""
+
+        if old_is_null:
+            parent = (self.local_path / target).parent
+            if target in tracked_files or not parent.exists():
+                return ""
+
+        if not removed and not added:
+            return ""
+
+        if removed == added:
+            return ""
+
+        return "\n".join(cleaned).strip()
+
+    @staticmethod
+    def _strip_diff_prefix(path: str) -> str:
+        """Normalize a diff path to a repo-relative path."""
+        if not path or path == "/dev/null":
+            return ""
+        return re.sub(r"^[ab]/", "", path.strip()).lstrip("/")
 
     @staticmethod
     def _patch_has_effective_changes(patch_text: str) -> bool:
@@ -644,6 +840,11 @@ class GitManager:
             return bool(result.strip())
         except Exception:
             return False
+
+    async def discard_changes(self):
+        """Reset the managed cloned repository to HEAD and remove untracked files."""
+        await self._run_git(["git", "reset", "--hard", "HEAD"], cwd=self.local_path)
+        await self._run_git(["git", "clean", "-fd"], cwd=self.local_path)
 
     async def get_current_diff(self) -> str:
         """Return the current diff of all changes (staged + unstaged)."""

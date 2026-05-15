@@ -81,10 +81,24 @@ class OpenHandsRunner:
 
         return env
 
+    @staticmethod
+    def _is_running_in_container() -> bool:
+        """Best-effort detection for code running inside a Docker container."""
+        return os.path.exists("/.dockerenv")
+
+    def _api_base_url(self) -> str:
+        """Resolve OpenHands API base URL for host vs in-container execution."""
+        if self._host_port is None:
+            raise RuntimeError("OpenHands host port is not initialized.")
+
+        host = "host.docker.internal" if self._is_running_in_container() else "localhost"
+        return f"http://{host}:{self._host_port}"
+
     def _get_volumes(self, workspace_path: str) -> dict:
         """Build volume mounts, handling Windows vs Linux Docker socket."""
+        docker_workspace_path = self._docker_visible_workspace_path(workspace_path)
         volumes = {
-            workspace_path: {"bind": settings.OPENHANDS_WORKSPACE, "mode": "rw"},
+            docker_workspace_path: {"bind": settings.OPENHANDS_WORKSPACE, "mode": "rw"},
         }
 
         if sys.platform == "win32":
@@ -100,6 +114,24 @@ class OpenHandsRunner:
             }
 
         return volumes
+
+    @staticmethod
+    def _docker_visible_workspace_path(workspace_path: str) -> str:
+        """
+        Convert an in-container /app path to the equivalent host path.
+
+        The backend itself runs in Docker, but it talks to the host Docker
+        daemon. Bind mounts for the OpenHands container therefore need host
+        paths, not the backend container's /app/... paths.
+        """
+        path = os.path.abspath(workspace_path)
+        host_root = (settings.PATCHPILOT_HOST_ROOT or "").strip()
+
+        if OpenHandsRunner._is_running_in_container() and host_root and path.startswith("/app"):
+            rel = os.path.relpath(path, "/app")
+            return os.path.join(host_root, rel).replace("\\", "/")
+
+        return path
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -178,10 +210,11 @@ class OpenHandsRunner:
         OpenHands exposes a REST API at /api/conversations and an SSE stream
         at /api/conversations/{id}/events.
         """
-        base_url = f"http://localhost:{self._host_port}"
+        base_url = self._api_base_url()
 
-        # Wait for container to be ready
+        # Wait for container to be ready and initialize settings for this runtime.
         await self._wait_for_ready(base_url)
+        await self._ensure_settings(base_url)
 
         # Create a new conversation/session
         conversation_id = await self._create_conversation(base_url, task_prompt)
@@ -196,15 +229,23 @@ class OpenHandsRunner:
         print("⏳ Waiting for OpenHands to be ready...")
         deadline = asyncio.get_event_loop().time() + timeout
 
+        readiness_paths = (
+            "/api/options/models",
+            "/api/options/models/",
+            "/api/settings",
+            "/",
+        )
+
         async with httpx.AsyncClient() as client:
             while asyncio.get_event_loop().time() < deadline:
-                try:
-                    resp = await client.get(f"{base_url}/api/options/models", timeout=5)
-                    if resp.status_code == 200:
-                        print("✅ OpenHands is ready!")
-                        return
-                except Exception:
-                    pass
+                for path in readiness_paths:
+                    try:
+                        resp = await client.get(f"{base_url}{path}", timeout=5, follow_redirects=True)
+                        if resp.status_code < 500:
+                            print(f"✅ OpenHands is ready via {path}!")
+                            return
+                    except Exception:
+                        continue
 
                 # Also check container hasn't died
                 if self._container:
@@ -223,25 +264,71 @@ class OpenHandsRunner:
 
         raise TimeoutError("OpenHands container did not become ready in time.")
 
-    async def _create_conversation(self, base_url: str, task: str) -> str:
-        """Create a new conversation in OpenHands and return the conversation ID."""
+    async def _settings_payload(self) -> dict:
+        """Build settings payload required by newer OpenHands APIs."""
+        provider = self._normalize_provider()
+        payload = {
+            "llm_model": self._openhands_model_name(),
+            "llm_api_key": "ollama" if provider == "ollama" else settings.GEMINI_API_KEY,
+        }
+
+        if provider == "ollama":
+            payload["llm_base_url"] = settings.OLLAMA_BASE_URL_DOCKER
+
+        return payload
+
+    async def _ensure_settings(self, base_url: str):
+        """Initialize server-side OpenHands settings before starting conversations."""
+        payload = await self._settings_payload()
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{base_url}/api/conversations",
-                json={
-                    "initial_user_msg": task,
-                },
+                f"{base_url}/api/settings",
+                json=payload,
                 timeout=30,
             )
-            
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                print(f"❌ OpenHands API Error: {e.response.text}")
+                print(f"❌ OpenHands settings error: {e.response.text}")
                 raise
-                
-            data = resp.json()
-            return data.get("conversation_id") or data.get("id") or str(data)
+
+    async def _create_conversation(self, base_url: str, task: str) -> str:
+        """Create a new conversation in OpenHands and return the conversation ID."""
+        async with httpx.AsyncClient() as client:
+            url = f"{base_url}/api/conversations"
+
+            # Primary payload (matches newer OpenHands schemas)
+            payloads = [
+                {"initial_user_msg": task},
+                {"initial_message": task},
+                {"messages": [{"role": "user", "content": task}]},
+            ]
+
+            last_exc = None
+            for idx, payload in enumerate(payloads, start=1):
+                try:
+                    resp = await client.post(url, json=payload, timeout=30)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("conversation_id") or data.get("id") or str(data)
+                except httpx.HTTPStatusError as e:
+                    body = e.response.text
+                    code = e.response.status_code
+                    print(f"❌ OpenHands API Error (attempt {idx}) {code}: {body}")
+                    last_exc = e
+                    # If 400, try the next payload; otherwise surface immediately
+                    if code != 400:
+                        raise
+                except Exception as e:
+                    print(f"❌ OpenHands request failed (attempt {idx}): {e}")
+                    last_exc = e
+
+            # If we reach here, all payload attempts failed — raise the last exception with context
+            if last_exc:
+                raise RuntimeError(
+                    f"Failed to create OpenHands conversation after trying multiple payloads. Last error: {last_exc}"
+                ) from last_exc
 
     async def _stream_events(
         self, base_url: str, conversation_id: str

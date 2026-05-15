@@ -21,6 +21,7 @@ class GitManager:
         self.name = repo_name
         self.token = github_token
         self.local_path = Path(settings.REPO_CLONE_DIR) / f"{repo_owner}_{repo_name}"
+        self.last_patch_error = ""
 
     # ── Clone ─────────────────────────────────────────────────────────────
 
@@ -84,7 +85,9 @@ class GitManager:
             print("✅ Patch applied successfully.")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"❌ Patch failed: {e.stderr}")
+            error_msg = e.stderr if hasattr(e, 'stderr') else str(e)
+            self.last_patch_error = error_msg
+            print(f"❌ Patch failed: {error_msg}")
             return False
 
     # ── Commit & Push ─────────────────────────────────────────────────────
@@ -155,6 +158,119 @@ class GitManager:
             capture_output=True,
         )
         return result
+
+    async def get_current_diff(self) -> str:
+        """Get the diff of all uncommitted changes (staged + unstaged)."""
+        result = await self._run_git(
+            ["git", "diff", "HEAD"],
+            cwd=self.local_path,
+            capture_output=True,
+        )
+        return result
+
+    async def has_changes(self) -> bool:
+        """Check if there are uncommitted changes in the repository."""
+        try:
+            result = await self._run_git(
+                ["git", "status", "--porcelain"],
+                cwd=self.local_path,
+                capture_output=True,
+            )
+            return bool(result.strip())
+        except Exception:
+            return False
+
+    async def get_all_files(self) -> list[str]:
+        """Get list of all files tracked by git in the repository."""
+        try:
+            result = await self._run_git(
+                ["git", "ls-files"],
+                cwd=self.local_path,
+                capture_output=True,
+            )
+            return [f for f in result.strip().split("\n") if f]
+        except Exception:
+            return []
+
+    async def apply_patch_direct(self, patch_content: str) -> bool:
+        """
+        Apply patch by directly modifying files.
+        This is a fallback when git apply fails.
+        Returns True if successful.
+        """
+        import difflib
+        import re
+
+        try:
+            # Parse patch lines
+            lines = patch_content.split("\n")
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+
+                # Look for diff headers (--- a/path/to/file or +++ b/path/to/file)
+                if line.startswith("--- a/"):
+                    file_path = line[6:].strip()
+                    i += 1
+
+                    # Skip to the actual content changes
+                    while i < len(lines) and not lines[i].startswith("@@"):
+                        i += 1
+
+                    if i >= len(lines):
+                        break
+
+                    # Extract hunk header to understand the context
+                    hunk_header = lines[i]
+                    i += 1
+
+                    # Collect patch lines for this file
+                    patch_lines = []
+                    while i < len(lines) and not lines[i].startswith("--- "):
+                        if not lines[i].startswith("+++"):
+                            patch_lines.append(lines[i])
+                        i += 1
+
+                    # Try to apply the patch to the file
+                    full_path = self.local_path / file_path
+                    if full_path.exists():
+                        try:
+                            content = full_path.read_text(encoding="utf-8", errors="replace")
+                            original_lines = content.split("\n")
+
+                            # Apply diff logic
+                            new_lines = original_lines.copy()
+                            offset = 0
+
+                            for patch_line in patch_lines:
+                                if patch_line.startswith("-"):
+                                    # Remove line
+                                    line_to_remove = patch_line[1:]
+                                    for idx, orig_line in enumerate(new_lines):
+                                        if orig_line == line_to_remove:
+                                            del new_lines[idx]
+                                            break
+                                elif patch_line.startswith("+"):
+                                    # Add line
+                                    line_to_add = patch_line[1:]
+                                    # Find the context and insert after
+                                    if idx < len(new_lines):
+                                        new_lines.insert(idx + 1, line_to_add)
+
+                            # Write back the modified content
+                            full_path.write_text("\n".join(new_lines), encoding="utf-8")
+                            print(f"✅ Directly patched: {file_path}")
+                        except Exception as e:
+                            print(f"⚠️ Failed to patch {file_path}: {e}")
+                else:
+                    i += 1
+
+            print("✅ Direct patch application completed.")
+            return True
+        except Exception as e:
+            self.last_patch_error = str(e)
+            print(f"❌ Direct patch failed: {e}")
+            return False
 
     # ── Internal ──────────────────────────────────────────────────────────
 

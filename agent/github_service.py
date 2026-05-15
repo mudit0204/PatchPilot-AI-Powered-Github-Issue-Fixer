@@ -50,7 +50,7 @@ class GitHubService:
             return GitHubIssue(
                 number=data["number"],
                 title=data["title"],
-                body=data.get("body", ""),
+                body=data.get("body") or "",
                 html_url=data["html_url"],
                 state=data["state"],
                 author=data["user"]["login"] if data.get("user") else None,
@@ -84,7 +84,7 @@ class GitHubService:
                 GitHubIssue(
                     number=item["number"],
                     title=item["title"],
-                    body=item.get("body", ""),
+                    body=item.get("body") or "",
                     html_url=item["html_url"],
                     state=item["state"],
                     author=item["user"]["login"] if item.get("user") else None,
